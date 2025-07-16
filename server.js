@@ -11,6 +11,8 @@ const AdminPostRoutes = require('./routes/AdminPost');
 const ReportRoutes = require('./routes/Reports');
 const dashboardRoutes = require('./routes/DashboardRoutes');
 const communicationRoutes = require('./routes/communication');
+const appointmentRoutes = require('./routes/appointment');
+
 
 const app = express();
 const server = http.createServer(app);
@@ -110,6 +112,7 @@ app.use('/api/admin', AdminPostRoutes);
 app.use('/api/reports', ReportRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/communication', communicationRoutes);
+app.use('/api/appointments', appointmentRoutes);
 
 
 // Health check endpoint
