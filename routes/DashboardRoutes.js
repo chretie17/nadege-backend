@@ -2,19 +2,13 @@ const express = require('express');
 const router = express.Router();
 const dashboardController = require('../controllers/DashboardController');
 
-// Routes for the dashboard data
-// All routes are protected with authentication middleware
+// Get dashboard data (main dashboard endpoint)
+router.get('/', dashboardController.getDashboardData);
 
-// Main dashboard stats (for the 4 cards)
-router.get('/stats',  dashboardController.getDashboardStats);
+// Get user profile summary
+router.get('/profile/:userId', dashboardController.getUserProfile);
 
-// Skills distribution chart data
-router.get('/skills-distribution',  dashboardController.getSkillsDistribution);
-
-// Job market trends data
-router.get('/job-market-trends', dashboardController.getJobMarketTrends);
-
-// Application funnel data
-router.get('/application-funnel', dashboardController.getApplicationFunnel);
+// Get quick stats for role-specific dashboard
+router.get('/stats', dashboardController.getQuickStats);
 
 module.exports = router;

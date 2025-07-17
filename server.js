@@ -113,6 +113,7 @@ app.use('/api/reports', ReportRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/communication', communicationRoutes);
 app.use('/api/appointments', appointmentRoutes);
+app.use('/api/notifications', require('./routes/Notifications'));
 
 
 // Health check endpoint

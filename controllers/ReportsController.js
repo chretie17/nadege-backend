@@ -1,8 +1,8 @@
 const db = require('../config/db');
 
-// Controller for EmpowerLink system reports with date range and search
+// Controller for Healthcare system reports with date range and search
 const reportsController = {
-    // 1. User Overview Report
+    // 1. User Overview Report (Updated for healthcare system)
     getUserOverviewReport: (req, res) => {
         try {
             // Extract date range and search query from request
@@ -32,14 +32,11 @@ const reportsController = {
                         (err, recentUsers) => {
                             if (err) return res.status(500).json({ error: err.message });
                             
+                            // Get doctor profile completeness
                             db.query(
-                                `SELECT id, username, name, email, role,
+                                `SELECT id, username, name, email, role, specialization, experience, education,
                                     CASE
-                                        WHEN skills IS NOT NULL AND LENGTH(skills) > 10 THEN 1
-                                        ELSE 0
-                                    END +
-                                    CASE
-                                        WHEN education IS NOT NULL AND LENGTH(education) > 10 THEN 1
+                                        WHEN specialization IS NOT NULL AND LENGTH(specialization) > 0 THEN 1
                                         ELSE 0
                                     END +
                                     CASE
@@ -47,38 +44,49 @@ const reportsController = {
                                         ELSE 0
                                     END +
                                     CASE
-                                        WHEN (SELECT COUNT(*) FROM user_skills WHERE user_id = users.id) > 0 THEN 1
+                                        WHEN education IS NOT NULL AND LENGTH(education) > 10 THEN 1
+                                        ELSE 0
+                                    END +
+                                    CASE
+                                        WHEN phone IS NOT NULL AND LENGTH(phone) > 0 THEN 1
                                         ELSE 0
                                     END AS completeness_score
                                 FROM users
-                                WHERE role = 'user' ${dateFilter ? 'AND' + dateFilter.substring(5) : ''} ${search ? 'AND ' + searchFilter.substring(6) : ''}
+                                WHERE role = 'doctor' ${dateFilter ? 'AND' + dateFilter.substring(5) : ''} ${search ? 'AND ' + searchFilter.substring(6) : ''}
                                 ORDER BY completeness_score DESC
                                 LIMIT 10`,
                                 [...getDateParams(startDate, endDate), ...searchParams],
-                                (err, completeProfiles) => {
+                                (err, completeDoctorProfiles) => {
                                     if (err) return res.status(500).json({ error: err.message });
                                     
-                                    const skillJoinCondition = dateFilter ? 
-                                        ` JOIN users u ON us.user_id = u.id ${dateFilter.replace('users.', 'u.')} ${searchFilter.replace('users.', 'u.')}` :
-                                        ` JOIN users u ON us.user_id = u.id ${searchFilter.replace('users.', 'u.')}`;
-                                        
+                                    // Get patient profile completeness
                                     db.query(
-                                        `SELECT sc.name as category_name, COUNT(DISTINCT us.user_id) as user_count
-                                        FROM skills_categories sc
-                                        JOIN skills s ON sc.id = s.category_id
-                                        JOIN user_skills us ON s.id = us.skill_id
-                                        ${skillJoinCondition}
-                                        GROUP BY sc.id
-                                        ORDER BY user_count DESC`,
+                                        `SELECT id, username, name, email, role, phone, date_of_birth,
+                                            CASE
+                                                WHEN phone IS NOT NULL AND LENGTH(phone) > 0 THEN 1
+                                                ELSE 0
+                                            END +
+                                            CASE
+                                                WHEN date_of_birth IS NOT NULL THEN 1
+                                                ELSE 0
+                                            END +
+                                            CASE
+                                                WHEN address IS NOT NULL AND LENGTH(address) > 5 THEN 1
+                                                ELSE 0
+                                            END AS completeness_score
+                                        FROM users
+                                        WHERE role = 'patient' ${dateFilter ? 'AND' + dateFilter.substring(5) : ''} ${search ? 'AND ' + searchFilter.substring(6) : ''}
+                                        ORDER BY completeness_score DESC
+                                        LIMIT 10`,
                                         [...getDateParams(startDate, endDate), ...searchParams],
-                                        (err, usersBySkillCategory) => {
+                                        (err, completePatientProfiles) => {
                                             if (err) return res.status(500).json({ error: err.message });
                                             
                                             res.json({
                                                 usersByRole,
                                                 recentUsers,
-                                                completeProfiles,
-                                                usersBySkillCategory,
+                                                completeDoctorProfiles,
+                                                completePatientProfiles,
                                                 metadata: {
                                                     dateRange: {
                                                         startDate: startDate || null,
@@ -100,71 +108,85 @@ const reportsController = {
         }
     },
 
-    // 2. Job Market Snapshot
-    getJobMarketSnapshot: (req, res) => {
+    // 2. Appointments Analytics Report - FIXED
+    getAppointmentsAnalytics: (req, res) => {
         try {
             // Extract date range and search query from request
             const { startDate, endDate, search } = req.query;
             
-            const dateFilter = startDate || endDate ? getDateRangeFilter(startDate, endDate, 'jobs.created_at', true) : '';
-            const searchFilter = search ? (dateFilter ? ' AND ' : ' WHERE ') + `(jobs.title LIKE ? OR jobs.location LIKE ? OR jobs.skills_required LIKE ?)` : '';
+            const dateFilter = startDate || endDate ? getDateRangeFilter(startDate, endDate, 'appointments.created_at', true) : '';
+            const searchFilter = search ? (dateFilter ? ' AND ' : ' WHERE ') + `(d.name LIKE ? OR d.specialization LIKE ? OR p.name LIKE ?)` : '';
             const searchParams = search ? [`%${search}%`, `%${search}%`, `%${search}%`] : [];
             
             db.query(
-                `SELECT COUNT(*) as total_jobs, 
-                COUNT(CASE WHEN application_deadline >= CURDATE() THEN 1 END) as active_jobs
-                FROM jobs
+                `SELECT 
+                    COUNT(*) as total_appointments,
+                    COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_count,
+                    COUNT(CASE WHEN status = 'confirmed' THEN 1 END) as confirmed_count,
+                    COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_count,
+                    COUNT(CASE WHEN status = 'cancelled' THEN 1 END) as cancelled_count,
+                    COUNT(CASE WHEN status = 'no_show' THEN 1 END) as no_show_count,
+                    ROUND((COUNT(CASE WHEN status = 'completed' THEN 1 END) / COUNT(*)) * 100, 2) as completion_rate
+                FROM appointments
+                JOIN users d ON appointments.doctor_id = d.id
+                JOIN users p ON appointments.patient_id = p.id
                 ${dateFilter} ${searchFilter}`,
                 [...getDateParams(startDate, endDate), ...searchParams],
-                (err, totalJobsResults) => {
+                (err, appointmentStats) => {
                     if (err) return res.status(500).json({ error: err.message });
-                    const totalJobs = totalJobsResults[0];
                     
                     db.query(
-                        `SELECT location, COUNT(*) as job_count
-                        FROM jobs
+                        `SELECT d.name as doctor_name, d.specialization,
+                            COUNT(*) as appointment_count,
+                            COUNT(CASE WHEN appointments.status = 'completed' THEN 1 END) as completed_count,
+                            ROUND((COUNT(CASE WHEN appointments.status = 'completed' THEN 1 END) / COUNT(*)) * 100, 2) as completion_rate
+                        FROM appointments
+                        JOIN users d ON appointments.doctor_id = d.id
+                        JOIN users p ON appointments.patient_id = p.id
                         ${dateFilter} ${searchFilter}
-                        GROUP BY location
-                        ORDER BY job_count DESC
-                        LIMIT 5`,
+                        GROUP BY d.id, d.name, d.specialization
+                        ORDER BY appointment_count DESC
+                        LIMIT 10`,
                         [...getDateParams(startDate, endDate), ...searchParams],
-                        (err, jobsByLocation) => {
+                        (err, doctorStats) => {
                             if (err) return res.status(500).json({ error: err.message });
                             
+                            // FIX: Specify d.specialization explicitly
                             db.query(
-                                `SELECT skills_required, COUNT(*) as job_count
-                                FROM jobs
-                                WHERE skills_required IS NOT NULL ${dateFilter ? 'AND' + dateFilter.substring(5) : ''} ${search ? 'AND ' + searchFilter.substring(6) : ''}
-                                GROUP BY skills_required
-                                ORDER BY job_count DESC
+                                `SELECT d.specialization, COUNT(*) as appointment_count
+                                FROM appointments
+                                JOIN users d ON appointments.doctor_id = d.id
+                                JOIN users p ON appointments.patient_id = p.id
+                                WHERE d.specialization IS NOT NULL ${dateFilter ? 'AND' + dateFilter.substring(5) : ''} ${search ? 'AND ' + searchFilter.substring(6) : ''}
+                                GROUP BY d.specialization
+                                ORDER BY appointment_count DESC
                                 LIMIT 10`,
                                 [...getDateParams(startDate, endDate), ...searchParams],
-                                (err, mostRequestedSkills) => {
+                                (err, specializationStats) => {
                                     if (err) return res.status(500).json({ error: err.message });
                                     
-                                    const appDateFilter = startDate || endDate ? getDateRangeFilter(startDate, endDate, 'job_applications.applied_at', true) : '';
-                                    
+                                    // Get appointment trends by month
                                     db.query(
                                         `SELECT 
-                                            COUNT(*) as total_applications,
-                                            COUNT(CASE WHEN status = 'accepted' THEN 1 END) as accepted_applications,
-                                            COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected_applications,
-                                            COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_applications,
-                                            COUNT(CASE WHEN status = 'interviewing' THEN 1 END) as interviewing_applications,
-                                            ROUND(IFNULL(COUNT(CASE WHEN status = 'accepted' THEN 1 END) / NULLIF(COUNT(*), 0) * 100, 0), 2) as success_rate
-                                        FROM job_applications
-                                        JOIN jobs ON job_applications.job_id = jobs.id
-                                        ${appDateFilter} ${searchFilter.replace('jobs.', 'jobs.')}`,
+                                            DATE_FORMAT(appointment_date, '%Y-%m') as month,
+                                            COUNT(*) as appointment_count,
+                                            COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed_count
+                                        FROM appointments
+                                        JOIN users d ON appointments.doctor_id = d.id
+                                        JOIN users p ON appointments.patient_id = p.id
+                                        ${dateFilter} ${searchFilter}
+                                        GROUP BY DATE_FORMAT(appointment_date, '%Y-%m')
+                                        ORDER BY month DESC
+                                        LIMIT 12`,
                                         [...getDateParams(startDate, endDate), ...searchParams],
-                                        (err, applicationStatsResults) => {
+                                        (err, appointmentTrends) => {
                                             if (err) return res.status(500).json({ error: err.message });
-                                            const applicationStats = applicationStatsResults[0];
                                             
                                             res.json({
-                                                totalJobs,
-                                                jobsByLocation,
-                                                mostRequestedSkills,
-                                                applicationStats,
+                                                appointmentStats: appointmentStats[0],
+                                                doctorStats,
+                                                specializationStats,
+                                                appointmentTrends,
                                                 metadata: {
                                                     dateRange: {
                                                         startDate: startDate || null,
@@ -186,98 +208,69 @@ const reportsController = {
         }
     },
 
-    // 3. Skills Assessment Summary
-    getSkillsAssessmentSummary: (req, res) => {
+    // 3. Doctor Availability Report - FIXED
+    getDoctorAvailabilityReport: (req, res) => {
         try {
             // Extract date range and search query from request
             const { startDate, endDate, search } = req.query;
             
-            const dateFilter = startDate || endDate ? getDateRangeFilter(startDate, endDate, 'us.assessed_at', true) : '';
-            const searchFilter = search ? (dateFilter ? ' AND ' : ' WHERE ') + `(s.name LIKE ? OR sc.name LIKE ?)` : '';
+            const searchFilter = search ? ` WHERE (d.name LIKE ? OR d.specialization LIKE ?)` : '';
             const searchParams = search ? [`%${search}%`, `%${search}%`] : [];
             
-            const baseQuery = `
-                FROM skills s
-                JOIN user_skills us ON s.id = us.skill_id
-                JOIN users u ON us.user_id = u.id
-                JOIN skills_categories sc ON s.category_id = sc.id
-                ${dateFilter} ${searchFilter} ${dateFilter || searchFilter ? 'AND' : 'WHERE'} u.role = 'user'
-            `;
-            
             db.query(
-                `SELECT s.name as skill_name, COUNT(us.user_id) as user_count
-                ${baseQuery}
-                GROUP BY s.id
-                ORDER BY user_count DESC
-                LIMIT 10`,
-                [...getDateParams(startDate, endDate), ...searchParams],
-                (err, commonSkills) => {
+                `SELECT d.id, d.name, d.specialization, d.experience,
+                    COUNT(da.id) as availability_slots,
+                    COUNT(CASE WHEN da.is_available = 1 THEN 1 END) as available_slots,
+                    COUNT(CASE WHEN da.is_available = 0 THEN 1 END) as unavailable_slots
+                FROM users d
+                LEFT JOIN doctor_availability da ON d.id = da.doctor_id
+                WHERE d.role = 'doctor' ${search ? 'AND ' + searchFilter.substring(6) : ''}
+                GROUP BY d.id, d.name, d.specialization, d.experience
+                ORDER BY available_slots DESC`,
+                [...searchParams],
+                (err, doctorAvailability) => {
                     if (err) return res.status(500).json({ error: err.message });
                     
                     db.query(
-                        `SELECT s.name as skill_name, 
-                        ROUND(AVG(us.proficiency_level), 2) as avg_proficiency,
-                        COUNT(us.user_id) as user_count
-                        ${baseQuery}
-                        GROUP BY s.id
-                        ORDER BY avg_proficiency DESC
-                        LIMIT 10`,
-                        [...getDateParams(startDate, endDate), ...searchParams],
-                        (err, averageProficiency) => {
+                        `SELECT 
+                            day_of_week,
+                            COUNT(*) as total_slots,
+                            COUNT(CASE WHEN is_available = 1 THEN 1 END) as available_slots
+                        FROM doctor_availability da
+                        JOIN users d ON da.doctor_id = d.id
+                        ${search ? 'WHERE ' + searchFilter.substring(6) : ''}
+                        GROUP BY day_of_week
+                        ORDER BY FIELD(day_of_week, 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday')`,
+                        [...searchParams],
+                        (err, availabilityByDay) => {
                             if (err) return res.status(500).json({ error: err.message });
                             
-                            // For skill gap, we need to modify the query slightly
-                            const gapQuery = `
-                                FROM skills s
-                                LEFT JOIN user_skills us ON s.id = us.skill_id
-                                JOIN skills_categories sc ON s.category_id = sc.id
-                                ${dateFilter.replace('us.', 'us.')} ${searchFilter}
-                            `;
-                            
+                            // FIX: Specify d.specialization explicitly
                             db.query(
-                                `SELECT s.name as skill_name,
-                                COUNT(DISTINCT us.user_id) as supply_count,
-                                (SELECT COUNT(*) FROM jobs j 
-                                 WHERE j.skills_required LIKE CONCAT('%', s.name, '%')) as demand_count,
-                                (SELECT COUNT(*) FROM jobs j 
-                                 WHERE j.skills_required LIKE CONCAT('%', s.name, '%')) - COUNT(DISTINCT us.user_id) as gap
-                                ${gapQuery}
-                                GROUP BY s.id
-                                HAVING demand_count > 0
-                                ORDER BY gap DESC
-                                LIMIT 10`,
-                                [...getDateParams(startDate, endDate), ...searchParams],
-                                (err, skillGap) => {
+                                `SELECT d.specialization,
+                                    COUNT(DISTINCT d.id) as total_doctors,
+                                    COUNT(CASE WHEN da.is_available = 1 THEN 1 END) as available_slots
+                                FROM users d
+                                LEFT JOIN doctor_availability da ON d.id = da.doctor_id
+                                WHERE d.role = 'doctor' AND d.specialization IS NOT NULL ${search ? 'AND ' + searchFilter.substring(6) : ''}
+                                GROUP BY d.specialization
+                                ORDER BY available_slots DESC`,
+                                [...searchParams],
+                                (err, availabilityBySpecialization) => {
                                     if (err) return res.status(500).json({ error: err.message });
                                     
-                                    db.query(
-                                        `SELECT u.id, u.name, u.username, u.email,
-                                        COUNT(us.skill_id) as skills_count,
-                                        ROUND(AVG(us.proficiency_level), 2) as avg_proficiency,
-                                        COUNT(CASE WHEN us.proficiency_level >= 4 THEN 1 END) as expert_skills_count
-                                        ${baseQuery}
-                                        GROUP BY u.id
-                                        ORDER BY avg_proficiency DESC, expert_skills_count DESC
-                                        LIMIT 10`,
-                                        [...getDateParams(startDate, endDate), ...searchParams],
-                                        (err, topSkilledUsers) => {
-                                            if (err) return res.status(500).json({ error: err.message });
-                                            
-                                            res.json({
-                                                commonSkills,
-                                                averageProficiency,
-                                                skillGap,
-                                                topSkilledUsers,
-                                                metadata: {
-                                                    dateRange: {
-                                                        startDate: startDate || null,
-                                                        endDate: endDate || null
-                                                    },
-                                                    search: search || null
-                                                }
-                                            });
+                                    res.json({
+                                        doctorAvailability,
+                                        availabilityByDay,
+                                        availabilityBySpecialization,
+                                        metadata: {
+                                            dateRange: {
+                                                startDate: startDate || null,
+                                                endDate: endDate || null
+                                            },
+                                            search: search || null
                                         }
-                                    );
+                                    });
                                 }
                             );
                         }
@@ -289,7 +282,7 @@ const reportsController = {
         }
     },
 
-    // 4. Community Engagement Metrics
+    // 4. Community Engagement Metrics (Kept as is)
     getCommunityEngagementMetrics: (req, res) => {
         try {
             // Extract date range and search query from request
@@ -404,7 +397,7 @@ const reportsController = {
                                                                 userParams.push(`%${search}%`, `%${search}%`);
                                                             }
                                                             
-                                                            usersQuery += ` GROUP BY u.id
+                                                            usersQuery += ` GROUP BY u.id, u.name, u.username, u.role
                                                             ORDER BY post_count DESC
                                                             LIMIT 10`;
                                                             
@@ -450,7 +443,7 @@ const reportsController = {
                                                                         topicParams.push(`%${search}%`, `%${search}%`);
                                                                     }
                                                                     
-                                                                    topicsQuery += ` GROUP BY ft.id
+                                                                    topicsQuery += ` GROUP BY ft.id, ft.title, u.name, ft.created_at
                                                                     ORDER BY post_count DESC
                                                                     LIMIT 10`;
                                                                     

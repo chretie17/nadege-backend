@@ -23,6 +23,5 @@ router.put('/flagged-content/:type/:id/approve', adminController.approveFlaggedC
 router.delete('/flagged-content/:type/:id', adminController.deleteFlaggedContent);
 
 // Admin Dashboard Stats
-router.get('/stats', adminController.getAdminStats);
 
 module.exports = router;
