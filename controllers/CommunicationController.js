@@ -1,69 +1,102 @@
 const db = require('../config/db');
 
 // Send a message
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+    destination: function (req, file, cb) {
+        const uploadDir = 'uploads/attachments';
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        cb(null, uploadDir);
+    },
+    filename: function (req, file, cb) {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, uniqueSuffix + path.extname(file.originalname));
+    }
+});
+
+const upload = multer({
+    storage: storage,
+    limits: {
+        fileSize: 10 * 1024 * 1024 // 10MB limit
+    },
+    fileFilter: function (req, file, cb) {
+        // Allow common file types
+        const allowedTypes = /jpeg|jpg|png|gif|pdf|doc|docx|txt|zip|rar/;
+        const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+        const mimetype = allowedTypes.test(file.mimetype);
+        
+        if (mimetype && extname) {
+            return cb(null, true);
+        } else {
+            cb(new Error('Invalid file type'));
+        }
+    }
+});
+
+// MODIFY your existing sendMessage function to handle attachments:
 exports.sendMessage = (req, res) => {
     const { sender_id, receiver_id, message, message_type } = req.body;
+    let attachment_url = null;
+    let attachment_name = null;
+    let attachment_type = null;
+    let attachment_size = null;
     
-    const query = 'INSERT INTO messages (sender_id, receiver_id, message, message_type) VALUES (?, ?, ?, ?)';
-    db.query(query, [sender_id, receiver_id, message, message_type || 'direct'], (err, results) => {
+    // Handle file attachment if present
+    if (req.file) {
+        attachment_url = `/uploads/attachments/${req.file.filename}`;
+        attachment_name = req.file.originalname;
+        attachment_type = req.file.mimetype;
+        attachment_size = req.file.size;
+    }
+    
+    const query = `INSERT INTO messages (sender_id, receiver_id, message, message_type, attachment_url, attachment_name, attachment_type, attachment_size) 
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
+    
+    db.query(query, [sender_id, receiver_id, message, message_type || 'direct', attachment_url, attachment_name, attachment_type, attachment_size], (err, results) => {
         if (err) {
             console.error('Error sending message:', err);
             return res.status(500).json({ error: err.message });
         }
         
-        // Get sender info for real-time notification
-        const senderQuery = 'SELECT username FROM users WHERE id = ?';
-        db.query(senderQuery, [sender_id], (err, senderResults) => {
-            if (err) {
-                console.error('Error fetching sender info:', err);
-                return res.status(500).json({ error: err.message });
-            }
+        // Rest of your existing sendMessage logic...
+        // But also include attachment info in the real-time message
+        if (receiver_id && req.connectedUsers.has(receiver_id.toString())) {
+            const receiverSocketId = req.connectedUsers.get(receiver_id.toString());
             
-            const senderName = senderResults[0]?.username || 'Unknown';
-            
-            // Create notification for new message in database
-            if (receiver_id) {
-                const notificationQuery = 'INSERT INTO notifications (user_id, title, message, type, related_id, related_type) VALUES (?, ?, ?, ?, ?, ?)';
-                const notificationTitle = `New message from ${senderName}`;
-                const notificationMessage = message.length > 50 ? message.substring(0, 50) + '...' : message;
-                
-                db.query(notificationQuery, [
-                    receiver_id, 
-                    notificationTitle, 
-                    notificationMessage, 
-                    'message', 
-                    results.insertId, 
-                    'message'
-                ], (notifErr, notifResults) => {
-                    if (notifErr) {
-                        console.error('Error creating message notification:', notifErr);
-                    } else {
-                        console.log('Message notification saved to database');
-                    }
-                });
-            }
-            
-            // Send real-time notification to receiver
-            if (receiver_id && req.connectedUsers.has(receiver_id.toString())) {
-                const receiverSocketId = req.connectedUsers.get(receiver_id.toString());
-                console.log(`Sending message to user ${receiver_id} via socket ${receiverSocketId}`);
-                
-                req.io.to(receiverSocketId).emit('new_message', {
-                    id: results.insertId,
-                    sender_id: parseInt(sender_id),
-                    sender_name: senderName,
-                    message,
-                    message_type,
-                    created_at: new Date().toISOString()
-                });
-            } else {
-                console.log(`User ${receiver_id} not connected or not found in connected users`);
-            }
-            
-            res.status(201).json({ message: 'Message sent successfully', messageId: results.insertId });
+            req.io.to(receiverSocketId).emit('new_message', {
+                id: results.insertId,
+                sender_id: parseInt(sender_id),
+                sender_name: senderName,
+                message,
+                message_type,
+                attachment_url,
+                attachment_name,
+                attachment_type,
+                attachment_size,
+                created_at: new Date().toISOString()
+            });
+        }
+        
+        res.status(201).json({ 
+            message: 'Message sent successfully', 
+            messageId: results.insertId,
+            attachment: req.file ? {
+                url: attachment_url,
+                name: attachment_name,
+                type: attachment_type,
+                size: attachment_size
+            } : null
         });
     });
 };
+
+exports.uploadAttachment = upload.single('attachment');
 
 // Get messages for a user
 exports.getMessages = (req, res) => {
