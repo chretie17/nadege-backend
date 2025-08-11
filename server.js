@@ -111,6 +111,7 @@ app.use('/api/', CommunitySkillsRoutes);
 app.use('/api/admin', AdminPostRoutes);
 app.use('/api/reports', ReportRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/doctor-reports', require('./routes/doctor-report'));
 app.use('/api/communication', communicationRoutes);
 app.use('/api/appointments', appointmentRoutes);
 app.use('/api/groups', require('./routes/group'));
