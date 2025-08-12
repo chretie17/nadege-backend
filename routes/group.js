@@ -28,5 +28,6 @@ router.post('/posts', groupController.createGroupPost);
 
 // Like/dislike a post
 router.post('/posts/like', groupController.likeGroupPost);
-
+router.get('/:groupId/requests', groupController.getGroupRequests);
+router.post('/handle-request', groupController.handleJoinRequest);
 module.exports = router;

@@ -1,6 +1,7 @@
 const db = require('../config/db');
 
 // Get all groups
+// Get all groups (including private ones so users can request to join)
 exports.getGroups = (req, res) => {
     const query = `
         SELECT 
@@ -18,7 +19,7 @@ exports.getGroups = (req, res) => {
         LEFT JOIN 
             group_posts gp ON g.id = gp.group_id
         WHERE 
-            g.status = 'active' AND g.privacy != 'private'
+            g.status = 'active'
         GROUP BY 
             g.id
         ORDER BY 
@@ -32,6 +33,7 @@ exports.getGroups = (req, res) => {
 };
 
 // Get user's groups
+// Get user's groups (including pending requests)
 exports.getUserGroups = (req, res) => {
     const { userId } = req.params;
     
@@ -42,13 +44,14 @@ exports.getUserGroups = (req, res) => {
             COUNT(DISTINCT gm2.user_id) as member_count,
             COUNT(DISTINCT gp.id) as post_count,
             MAX(gp.created_at) as last_activity,
-            gm.role as user_role
+            gm.role as user_role,
+            gm.status as status
         FROM 
             \`groups\` g
         JOIN 
             users u ON g.created_by = u.id
         JOIN 
-            group_members gm ON g.id = gm.group_id AND gm.user_id = ? AND gm.status = 'active'
+            group_members gm ON g.id = gm.group_id AND gm.user_id = ?
         LEFT JOIN 
             group_members gm2 ON g.id = gm2.group_id AND gm2.status = 'active'
         LEFT JOIN 
@@ -56,7 +59,7 @@ exports.getUserGroups = (req, res) => {
         WHERE 
             g.status = 'active'
         GROUP BY 
-            g.id, gm.role
+            g.id, gm.role, gm.status
         ORDER BY 
             last_activity DESC, g.created_at DESC
     `;
@@ -209,6 +212,7 @@ exports.createGroup = (req, res) => {
 };
 
 // Join a group
+// Updated joinGroup function to handle requests for private groups
 exports.joinGroup = (req, res) => {
     const { groupId, userId } = req.body;
     
@@ -216,43 +220,178 @@ exports.joinGroup = (req, res) => {
         return res.status(400).json({ error: 'Group ID and user ID are required' });
     }
     
-    // Check if user is already a member
-    const checkQuery = `
-        SELECT * FROM group_members 
-        WHERE group_id = ? AND user_id = ?
+    // First check if group exists and get privacy setting
+    const groupCheckQuery = `
+        SELECT privacy FROM \`groups\` 
+        WHERE id = ? AND status = 'active'
     `;
     
-    db.query(checkQuery, [groupId, userId], (err, results) => {
+    db.query(groupCheckQuery, [groupId], (err, groupResults) => {
         if (err) return res.status(500).json({ error: err.message });
         
-        if (results.length > 0) {
-            if (results[0].status === 'active') {
-                return res.status(400).json({ error: 'User is already a member of this group' });
+        if (groupResults.length === 0) {
+            return res.status(404).json({ error: 'Group not found' });
+        }
+        
+        const group = groupResults[0];
+        
+        // Check if user is already a member or has pending request
+        const checkQuery = `
+            SELECT * FROM group_members 
+            WHERE group_id = ? AND user_id = ?
+        `;
+        
+        db.query(checkQuery, [groupId, userId], (err, results) => {
+            if (err) return res.status(500).json({ error: err.message });
+            
+            if (results.length > 0) {
+                const existingMember = results[0];
+                
+                if (existingMember.status === 'active') {
+                    return res.status(400).json({ error: 'User is already a member of this group' });
+                } else if (existingMember.status === 'pending') {
+                    return res.status(400).json({ error: 'Join request already sent and pending approval' });
+                } else {
+                    // Reactivate membership for public groups, send request for private
+                    const newStatus = group.privacy === 'private' ? 'pending' : 'active';
+                    const updateQuery = `
+                        UPDATE group_members 
+                        SET status = ?, joined_at = CURRENT_TIMESTAMP
+                        WHERE group_id = ? AND user_id = ?
+                    `;
+                    
+                    db.query(updateQuery, [newStatus, groupId, userId], (err) => {
+                        if (err) return res.status(500).json({ error: err.message });
+                        
+                        const message = group.privacy === 'private' 
+                            ? 'Join request sent! You will be notified when approved.'
+                            : 'Successfully rejoined group';
+                        
+                        res.json({ message, status: newStatus });
+                    });
+                }
             } else {
-                // Reactivate membership
-                const updateQuery = `
-                    UPDATE group_members 
-                    SET status = 'active', joined_at = CURRENT_TIMESTAMP
-                    WHERE group_id = ? AND user_id = ?
+                // Add new member/request
+                const memberStatus = group.privacy === 'private' ? 'pending' : 'active';
+                const insertQuery = `
+                    INSERT INTO group_members (group_id, user_id, role, status)
+                    VALUES (?, ?, 'member', ?)
                 `;
                 
-                db.query(updateQuery, [groupId, userId], (err) => {
+                db.query(insertQuery, [groupId, userId, memberStatus], (err) => {
                     if (err) return res.status(500).json({ error: err.message });
-                    res.json({ message: 'Successfully rejoined group' });
+                    
+                    const message = group.privacy === 'private' 
+                        ? 'Join request sent! You will be notified when approved.'
+                        : 'Successfully joined group';
+                    
+                    res.json({ message, status: memberStatus });
                 });
             }
-        } else {
-            // Add new member
-            const insertQuery = `
-                INSERT INTO group_members (group_id, user_id, role, status)
-                VALUES (?, ?, 'member', 'active')
+        });
+    });
+};
+
+// Simple function to approve/reject requests (for group creators only)
+exports.handleJoinRequest = (req, res) => {
+    const { groupId, userId, action } = req.body; // action: 'approve' or 'reject'
+    const adminId = req.body.adminId; // The person approving (should be group creator)
+    
+    if (!groupId || !userId || !action || !adminId) {
+        return res.status(400).json({ error: 'Missing required fields' });
+    }
+    
+    // Check if the person is the group creator
+    const adminQuery = `
+        SELECT created_by FROM \`groups\` 
+        WHERE id = ? AND created_by = ?
+    `;
+    
+    db.query(adminQuery, [groupId, adminId], (err, adminResults) => {
+        if (err) return res.status(500).json({ error: err.message });
+        
+        if (adminResults.length === 0) {
+            return res.status(403).json({ error: 'Only the group creator can approve requests' });
+        }
+        
+        if (action === 'approve') {
+            // Approve the request
+            const approveQuery = `
+                UPDATE group_members 
+                SET status = 'active', joined_at = CURRENT_TIMESTAMP
+                WHERE group_id = ? AND user_id = ? AND status = 'pending'
             `;
             
-            db.query(insertQuery, [groupId, userId], (err) => {
+            db.query(approveQuery, [groupId, userId], (err, result) => {
                 if (err) return res.status(500).json({ error: err.message });
-                res.json({ message: 'Successfully joined group' });
+                
+                if (result.affectedRows === 0) {
+                    return res.status(404).json({ error: 'Join request not found' });
+                }
+                
+                res.json({ message: 'User approved and added to group' });
             });
+        } else if (action === 'reject') {
+            // Reject - remove the request
+            const rejectQuery = `
+                DELETE FROM group_members 
+                WHERE group_id = ? AND user_id = ? AND status = 'pending'
+            `;
+            
+            db.query(rejectQuery, [groupId, userId], (err, result) => {
+                if (err) return res.status(500).json({ error: err.message });
+                
+                if (result.affectedRows === 0) {
+                    return res.status(404).json({ error: 'Join request not found' });
+                }
+                
+                res.json({ message: 'Join request rejected' });
+            });
+        } else {
+            res.status(400).json({ error: 'Action must be approve or reject' });
         }
+    });
+};
+
+// Get pending requests for group creator
+exports.getGroupRequests = (req, res) => {
+    const { groupId } = req.params;
+    const { creatorId } = req.query;
+    
+    // Check if requester is group creator
+    const creatorQuery = `
+        SELECT id FROM \`groups\` 
+        WHERE id = ? AND created_by = ?
+    `;
+    
+    db.query(creatorQuery, [groupId, creatorId], (err, creatorResults) => {
+        if (err) return res.status(500).json({ error: err.message });
+        
+        if (creatorResults.length === 0) {
+            return res.status(403).json({ error: 'Only group creator can view requests' });
+        }
+        
+        // Get pending requests
+        const requestsQuery = `
+            SELECT 
+                gm.user_id,
+                gm.joined_at as requested_at,
+                u.name as user_name,
+                u.email as user_email
+            FROM 
+                group_members gm
+            JOIN 
+                users u ON gm.user_id = u.id
+            WHERE 
+                gm.group_id = ? AND gm.status = 'pending'
+            ORDER BY 
+                gm.joined_at DESC
+        `;
+        
+        db.query(requestsQuery, [groupId], (err, results) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(results);
+        });
     });
 };
 
